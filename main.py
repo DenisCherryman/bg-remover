@@ -1,14 +1,13 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from rembg import remove
+from rembg import remove, new_session
 from PIL import Image
-import uuid
-import os
 import io
 
 app = FastAPI()
 
+# Дозволити CORS-запити
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,28 +15,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Створення сесії з полегшеною моделлю u2netp
+session = new_session(model_name="u2netp")
+
 @app.post("/remove")
 async def remove_background(file: UploadFile = File(...)):
     try:
-        # Зчитування байтів
+        # Читання байтів з файлу
         input_data = await file.read()
         image = Image.open(io.BytesIO(input_data)).convert("RGBA")
 
-        # Обмеження розміру зображення для економії RAM
-        MAX_SIZE = (800, 800)
+        # Зменшення розміру для оптимізації RAM
+        MAX_SIZE = (600, 600)
         image.thumbnail(MAX_SIZE)
 
-        # Конвертуємо у PNG-байти для rembg
+        # Перетворення у PNG-байти
         buffered = io.BytesIO()
         image.save(buffered, format="PNG")
-        output_data = remove(buffered.getvalue())
+        img_bytes = buffered.getvalue()
 
-        # Збереження результату
-        filename = f"no_bg_{uuid.uuid4().hex}.png"
-        with open(filename, "wb") as out_file:
-            out_file.write(output_data)
+        # Видалення фону через rembg
+        output_bytes = remove(img_bytes, session=session)
 
-        return FileResponse(filename, media_type="image/png", filename="no_background.png")
+        # Відкриття обробленого зображення
+        output_image = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
+
+        # Обрізання прозорих пікселів по краях
+        bbox = output_image.getbbox()
+        if bbox:
+            output_image = output_image.crop(bbox)
+
+        # Підготовка відповіді
+        result_buffer = io.BytesIO()
+        output_image.save(result_buffer, format="PNG")
+        result_buffer.seek(0)
+
+        return StreamingResponse(result_buffer, media_type="image/png", headers={
+            "Content-Disposition": "attachment; filename=no_background.png"
+        })
 
     except Exception as e:
         return {"error": str(e)}
